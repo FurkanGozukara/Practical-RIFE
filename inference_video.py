@@ -11,6 +11,7 @@ import skvideo.io
 from queue import Queue, Empty
 import subprocess  # Newly added for ffmpeg process handling
 import time
+from model.pytorch_msssim import ssim_matlab
 
 warnings.filterwarnings("ignore")
 
@@ -151,7 +152,7 @@ else:
         '-profile:v', 'high',
         '-level', '3.1',
         '-preset', 'veryslow',
-        '-crf', '18',
+        '-crf', '12',
         '-pix_fmt', 'yuv420p',
         '-x264-params', 'ref=4:cabac=1',
         vid_out_name
