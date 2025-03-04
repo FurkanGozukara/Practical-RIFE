@@ -1,3 +1,4 @@
+# inference_video.py
 import os
 import cv2
 import torch
@@ -9,7 +10,7 @@ import warnings
 import _thread
 import skvideo.io
 from queue import Queue, Empty
-import subprocess  # Newly added for ffmpeg process handling
+import subprocess  # For ffmpeg process handling
 import time
 from model.pytorch_msssim import ssim_matlab
 
@@ -19,27 +20,38 @@ warnings.filterwarnings("ignore")
 def transferAudio(sourceVideo, targetVideo):
     import shutil
     import moviepy.editor
-    tempAudioFileName = "./temp/audio.mkv"
+    import os
+    temp_dir = "./temp"
+    tempAudioFileName = os.path.join(temp_dir, "audio.mkv")
+    
+    # Check if source video contains an audio stream
+    audio_check_cmd = f'ffprobe -loglevel error -select_streams a -show_entries stream=index -of csv=p=0 "{sourceVideo}"'
+    audio_streams = os.popen(audio_check_cmd).read().strip()
+    if not audio_streams:
+        print("No audio stream found in source video. Skipping audio transfer.")
+        return
 
-    # split audio from original video file and store in "temp" directory
-    if True:
-        # clear old "temp" directory if it exits
-        if os.path.isdir("temp"):
-            shutil.rmtree("temp")
-        os.makedirs("temp")
-        # extract audio from video
-        os.system('ffmpeg -y -i "{}" -c:a copy -vn {}'.format(sourceVideo, tempAudioFileName))
+    # Clear old "temp" directory if it exists and create a fresh one
+    if os.path.isdir(temp_dir):
+        shutil.rmtree(temp_dir)
+    os.makedirs(temp_dir)
+    
+    # Extract audio from the source video using -map 0:a? to grab audio if available.
+    os.system(f'ffmpeg -y -i "{sourceVideo}" -map 0:a? -c:a copy -vn "{tempAudioFileName}"')
+    if not os.path.exists(tempAudioFileName) or os.path.getsize(tempAudioFileName) == 0:
+        print("Audio extraction failed. Skipping audio transfer.")
+        return
 
     targetNoAudio = os.path.splitext(targetVideo)[0] + "_noaudio" + os.path.splitext(targetVideo)[1]
     os.rename(targetVideo, targetNoAudio)
-    # combine audio file and new video file
-    os.system('ffmpeg -y -i "{}" -i {} -c copy "{}"'.format(targetNoAudio, tempAudioFileName, targetVideo))
+    # Combine the extracted audio with the new video file
+    os.system(f'ffmpeg -y -i "{targetNoAudio}" -i "{tempAudioFileName}" -c copy "{targetVideo}"')
 
-    if os.path.getsize(targetVideo) == 0:  # if ffmpeg failed to merge the video and audio together try converting the audio to aac
-        tempAudioFileName = "./temp/audio.m4a"
-        os.system('ffmpeg -y -i "{}" -c:a aac -b:a 160k -vn {}'.format(sourceVideo, tempAudioFileName))
-        os.system('ffmpeg -y -i "{}" -i {} -c copy "{}"'.format(targetNoAudio, tempAudioFileName, targetVideo))
-        if (os.path.getsize(targetVideo) == 0):  # if aac is not supported by selected format
+    if os.path.getsize(targetVideo) == 0:  # if merging failed, try transcoding the audio to AAC
+        tempAudioFileName_aac = os.path.join(temp_dir, "audio.m4a")
+        os.system(f'ffmpeg -y -i "{sourceVideo}" -map 0:a? -c:a aac -b:a 160k -vn "{tempAudioFileName_aac}"')
+        os.system(f'ffmpeg -y -i "{targetNoAudio}" -i "{tempAudioFileName_aac}" -c copy "{targetVideo}"')
+        if os.path.getsize(targetVideo) == 0:
             os.rename(targetNoAudio, targetVideo)
             print("Audio transfer failed. Interpolated video will have no audio")
         else:
@@ -48,7 +60,7 @@ def transferAudio(sourceVideo, targetVideo):
     else:
         os.remove(targetNoAudio)
 
-    shutil.rmtree("temp")
+    shutil.rmtree(temp_dir)
 
 
 parser = argparse.ArgumentParser(description='Interpolation for a pair of images')
@@ -270,15 +282,6 @@ while True:
         output = []
         for i in range(args.multi - 1):
             output.append(I0)
-        '''
-        output = []
-        step = 1 / args.multi
-        alpha = 0
-        for i in range(args.multi - 1):
-            alpha += step
-            beta = 1-alpha
-            output.append(torch.from_numpy(np.transpose((cv2.addWeighted(frame[:, :, ::-1], alpha, lastframe[:, :, ::-1], beta, 0)[:, :, ::-1].copy()), (2,0,1))).to(device, non_blocking=True).unsqueeze(0).float() / 255.)
-        '''
     else:
         output = make_inference(I0, I1, args.multi - 1)
 
