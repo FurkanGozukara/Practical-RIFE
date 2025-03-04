@@ -4,6 +4,10 @@ import cv2
 import torch
 import argparse
 import numpy as np
+if not hasattr(np, 'float'):
+    np.float = float
+if not hasattr(np, 'int'):
+    np.int = int
 from tqdm import tqdm
 from torch.nn import functional as F
 import warnings
