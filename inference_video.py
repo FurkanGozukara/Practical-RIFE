@@ -23,35 +23,37 @@ warnings.filterwarnings("ignore")
 
 def transferAudio(sourceVideo, targetVideo):
     import shutil
-    import moviepy.editor
     import os
     temp_dir = "./temp"
     tempAudioFileName = os.path.join(temp_dir, "audio.mkv")
     
-    # Check if source video contains an audio stream
+    # Check if source video contains an audio stream using ffprobe
     audio_check_cmd = f'ffprobe -loglevel error -select_streams a -show_entries stream=index -of csv=p=0 "{sourceVideo}"'
     audio_streams = os.popen(audio_check_cmd).read().strip()
     if not audio_streams:
         print("No audio stream found in source video. Skipping audio transfer.")
         return
 
-    # Clear old "temp" directory if it exists and create a fresh one
+    # Remove any existing temp directory and create a fresh one
     if os.path.isdir(temp_dir):
         shutil.rmtree(temp_dir)
     os.makedirs(temp_dir)
     
-    # Extract audio from the source video using -map 0:a? to grab audio if available.
+    # Extract audio from the source video with ffmpeg
     os.system(f'ffmpeg -y -i "{sourceVideo}" -map 0:a? -c:a copy -vn "{tempAudioFileName}"')
     if not os.path.exists(tempAudioFileName) or os.path.getsize(tempAudioFileName) == 0:
         print("Audio extraction failed. Skipping audio transfer.")
         return
 
+    # Rename the target video to have a temporary name without audio
     targetNoAudio = os.path.splitext(targetVideo)[0] + "_noaudio" + os.path.splitext(targetVideo)[1]
     os.rename(targetVideo, targetNoAudio)
-    # Combine the extracted audio with the new video file
+    
+    # Merge the extracted audio with the new video file using ffmpeg
     os.system(f'ffmpeg -y -i "{targetNoAudio}" -i "{tempAudioFileName}" -c copy "{targetVideo}"')
 
-    if os.path.getsize(targetVideo) == 0:  # if merging failed, try transcoding the audio to AAC
+    # If the merging failed (resulting file size 0), try transcoding the audio to AAC (M4A)
+    if os.path.getsize(targetVideo) == 0:
         tempAudioFileName_aac = os.path.join(temp_dir, "audio.m4a")
         os.system(f'ffmpeg -y -i "{sourceVideo}" -map 0:a? -c:a aac -b:a 160k -vn "{tempAudioFileName_aac}"')
         os.system(f'ffmpeg -y -i "{targetNoAudio}" -i "{tempAudioFileName_aac}" -c copy "{targetVideo}"')
