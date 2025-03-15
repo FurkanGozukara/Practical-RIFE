@@ -158,23 +158,41 @@ else:
         vid_out_name = '{}_{}X_{}fps.{}'.format(video_path_wo_ext, args.multi, int(np.round(args.fps)), args.ext)
     # Instead of cv2.VideoWriter, we create an FFmpeg subprocess that encodes raw frames to H.264.
     ffmpeg_cmd = [
-        'ffmpeg', '-y',
-        '-f', 'rawvideo',
-        '-vcodec', 'rawvideo',
-        '-pix_fmt', 'bgr24',
-        '-s', f'{w}x{h}',
-        '-r', str(int(np.round(args.fps))),
-        '-i', '-',  # input from pipe
-        '-an',
-        '-vcodec', 'libx264',
-        '-profile:v', 'high',
-        '-level', '3.1',
-        '-preset', 'veryslow',
-        '-crf', '12',
-        '-pix_fmt', 'yuv420p',
-        '-x264-params', 'ref=4:cabac=1',
-        vid_out_name
-    ]
+    'ffmpeg', '-y',
+    # Define input as raw video with frame dimensions and rate.
+    '-f', 'rawvideo',
+    '-vcodec', 'rawvideo',
+    '-pix_fmt', 'bgr24',
+    '-s', f'{w}x{h}',
+    '-r', str(int(np.round(args.fps))),
+    '-i', '-',  # input from pipe
+
+    # Disable audio
+    '-an',
+
+    # Add a video filter to inject subtle noise to mask banding.
+    '-vf', 'noise=alls=3:allf=t',
+
+    # Video encoding using libx264.
+    '-vcodec', 'libx264',
+    '-profile:v', 'high',
+    '-level', '3.1',
+
+    # Use a faster preset to speed up encoding.
+    '-preset', 'slow',
+
+    # Maintain high quality.
+    '-crf', '10',
+
+    # Specify output pixel format.
+    '-pix_fmt', 'yuv420p',
+
+    # x264 specific parameters.
+    '-x264-params', 'ref=4:cabac=1',
+
+    # Output file name.
+    vid_out_name
+]
     ffmpeg_process = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE)
 
 
