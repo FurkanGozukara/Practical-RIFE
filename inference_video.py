@@ -84,6 +84,8 @@ parser.add_argument('--png', dest='png', action='store_true', help='whether to v
 parser.add_argument('--ext', dest='ext', type=str, default='mp4', help='vid_out video extension')
 parser.add_argument('--exp', dest='exp', type=int, default=1)
 parser.add_argument('--multi', dest='multi', type=int, default=2)
+# New argument to skip audio transfer if desired.
+parser.add_argument('--no-audio', dest='no_audio', action='store_true', help='Skip audio transfer even if source video has audio')
 
 args = parser.parse_args()
 if args.exp != 1:
@@ -321,8 +323,8 @@ if not args.png:
     ffmpeg_process.stdin.close()
     ffmpeg_process.wait()
 
-# Move audio to the new video file if appropriate.
-if args.png == False and fpsNotAssigned == True and not args.video is None:
+# Handle audio transfer only if not disabled via --no-audio flag.
+if (not args.no_audio) and (args.png == False) and fpsNotAssigned == True and (not args.video is None):
     try:
         transferAudio(args.video, vid_out_name)
     except Exception:
