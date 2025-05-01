@@ -15,6 +15,7 @@ import sys
 import re
 from queue import Queue, Empty
 from torch.nn import functional as F
+import traceback
 
 # Force immediate console output (no buffering)
 sys.stdout.reconfigure(line_buffering=True)
@@ -47,33 +48,32 @@ except ImportError:
 
 def listen_for_cancel():
     """
-    Listen for a key press to cancel the FPS increase process.
+    Listen for a key press to cancel the FPS increase process on Windows.
     When the user presses 'c' (or 'C'), set the cancel_increase flag.
+    Non-Windows input handling is removed as it causes issues with subprocess.
     """
     global cancel_increase
-    print("Press 'c' at any time to cancel the FPS increase process.")
-    try:
-        if msvcrt:
-            # Non-blocking key detection for Windows.
+    if msvcrt: # Only run if msvcrt (Windows) is available
+        print("Press 'c' at any time to cancel the FPS increase process (Windows only).")
+        try:
             while True:
                 if msvcrt.kbhit():
-                    key = msvcrt.getch().decode('utf-8')
+                    key = msvcrt.getch().decode('utf-8', errors='ignore') # Added error handling
                     if key.lower() == 'c':
                         cancel_increase = True
-                        sys.stdout.write("\nCancellation requested. Interpolation will be skipped.\n")
+                        sys.stdout.write("\nCancellation requested via keypress. Interpolation will be skipped.\n")
                         sys.stdout.flush()
                         break
-                time.sleep(0.1)
-        else:
-            # Blocking input for non-Windows platforms.
-            while True:
-                key = input()
-                if key.lower() == 'c':
-                    cancel_increase = True
-                    print("Cancellation requested. Interpolation will be skipped.")
-                    break
-    except Exception as e:
-        print("Error in cancellation listener thread:", e)
+                time.sleep(0.1) # Reduce CPU usage
+        except Exception as e:
+            # This might happen if the console closes unexpectedly
+            print(f"\nWarning: Error in Windows cancellation listener thread: {e}")
+    else:
+        # Print info message for non-windows users
+        print("[INFO] Keystroke cancellation ('c') is only available on Windows.")
+        # Keep thread alive without blocking stdin
+        while not cancel_increase: # Check the flag periodically
+             time.sleep(0.5)
 
 # =============================================================================
 # Parse command line arguments
@@ -293,30 +293,39 @@ else:
     else:
         vid_out_name = '{}_{}X_{}fps.{}'.format(video_path_wo_ext, args.multi, int(np.round(args.fps)), args.ext)
         
-    print(f" {os.path.basename(vid_out_name)} [{w}x{h}@{int(np.round(args.fps))}fps]")
-    ffmpeg_cmd = [
+    # Define temporary high-FPS filename
+    vid_out_name_temp_highfps = os.path.splitext(vid_out_name)[0] + "_temp_highfps" + os.path.splitext(vid_out_name)[1]
+    
+    # Print info about the high-FPS intermediate file
+    # Estimate the actual high FPS based on source FPS and multiplier
+    actual_high_fps = fps * args.multi # Calculate the actual high FPS
+    print(f" Initial encoding to: {os.path.basename(vid_out_name_temp_highfps)} [{w}x{h}@{actual_high_fps:.2f}fps]")
+    
+    # First ffmpeg command: Encode raw frames to high-FPS intermediate file
+    ffmpeg_cmd_1 = [
         'ffmpeg', '-y',
         '-f', 'rawvideo',
         '-vcodec', 'rawvideo',
         '-pix_fmt', 'bgr24',
         '-s', f'{w}x{h}',
-        '-r', str(int(np.round(args.fps))),
+        '-r', str(actual_high_fps), # <<< Set the correct high framerate for the input pipe
         '-i', '-',  # input from pipe
-        '-an',
+        '-an', # No audio for this intermediate step
         '-vcodec', 'libx264',
-        '-profile:v', 'high',
-        '-level', '3.1',
-        '-preset', 'veryslow',
-        '-crf', '12',
+        '-preset', 'slow', # Faster preset for temp file is okay
+        '-crf', '10', # Slightly lower quality for temp file is okay
         '-pix_fmt', 'yuv420p',
-        '-x264-params', 'ref=4:cabac=1',
-        vid_out_name
+        vid_out_name_temp_highfps # Output to temporary high-FPS file
     ]
     # Use DEVNULL for stdout/stderr if not showing FFmpeg output
     ffmpeg_stdout = None if show_ffmpeg_output else subprocess.DEVNULL
     ffmpeg_stderr = None if show_ffmpeg_output else subprocess.DEVNULL
-    ffmpeg_process = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE, 
+    # Store the first process
+    ffmpeg_process_1 = subprocess.Popen(ffmpeg_cmd_1, stdin=subprocess.PIPE, 
                                      stdout=ffmpeg_stdout, stderr=ffmpeg_stderr)
+    
+    # Pass the correct process to the writer thread
+    ffmpeg_process = ffmpeg_process_1 # The writer thread writes to this first process
 
 # =============================================================================
 # Audio transfer function (unchanged)
@@ -353,14 +362,14 @@ def transferAudio(sourceVideo, targetVideo):
     
     print("Merging audio with new video...", end="")
     sys.stdout.flush()
-    os.system(f'ffmpeg -y -i "{targetNoAudio}" -i "{tempAudioFileName}" -c copy "{targetVideo}"{redirect}')
+    os.system(f'ffmpeg -y -i "{targetNoAudio}" -i "{tempAudioFileName}" -c copy -shortest "{targetVideo}"{redirect}')
 
     if os.path.getsize(targetVideo) == 0:
         print(" failed with copy, trying with transcode...")
         sys.stdout.flush()
         tempAudioFileName_aac = os.path.join(temp_dir, "audio.m4a")
         os.system(f'ffmpeg -y -i "{sourceVideo}" -map 0:a? -c:a aac -b:a 160k -vn "{tempAudioFileName_aac}"{redirect}')
-        os.system(f'ffmpeg -y -i "{targetNoAudio}" -i "{tempAudioFileName_aac}" -c copy "{targetVideo}"{redirect}')
+        os.system(f'ffmpeg -y -i "{targetNoAudio}" -i "{tempAudioFileName_aac}" -c copy -shortest "{targetVideo}"{redirect}')
         if os.path.getsize(targetVideo) == 0:
             os.rename(targetNoAudio, targetVideo)
             print(" failed! Output will have no audio.")
@@ -566,16 +575,102 @@ print(f"[SUCCESS] Processing complete! {current_frame} frames in {total_time:.2f
 sys.stdout.flush()
 
 if not args.png:
-    ffmpeg_process.stdin.close()
-    ffmpeg_process.wait()
+    # <<< Wait for the first ffmpeg process (high-FPS encoding) to finish >>>
+    print("\nWaiting for initial high-FPS encoding to complete...")
+    sys.stdout.flush()
+    ffmpeg_process_1.stdin.close() # Close stdin to signal end of input
+    ffmpeg_process_1.wait() # Wait for the process to terminate
+    print("Initial encoding finished.")
 
-if (not args.no_audio) and (not args.png) and fpsNotAssigned and (args.video is not None):
+    # <<< Check if the temporary file was created >>>
+    if os.path.exists(vid_out_name_temp_highfps) and os.path.getsize(vid_out_name_temp_highfps) > 0:
+
+        # <<< Calculate target FPS >>>
+        target_fps = int(np.round(args.fps))
+        # We calculated actual_high_fps earlier: actual_high_fps = fps * args.multi
+
+        # <<< Conditional Re-encoding >>>
+        if target_fps < actual_high_fps:
+            # Run re-encoding only if target FPS is lower
+            print(f"Target FPS ({target_fps}) is lower than actual high FPS ({actual_high_fps:.2f}). Re-encoding to -> {os.path.basename(vid_out_name)}...")
+            sys.stdout.flush()
+            ffmpeg_cmd_2 = [
+                'ffmpeg', '-y',
+                '-i', vid_out_name_temp_highfps, # Input is the high-FPS temp file
+                '-r', str(target_fps), # Apply the target frame rate
+                '-c:v', 'libx264',
+                '-preset', 'slow', # Use original slower preset for final quality
+                '-crf', '10', # Use original CRF for final quality
+                '-pix_fmt', 'yuv420p',
+                '-an', # No audio yet
+                vid_out_name # Output to the final video name
+            ]
+            re_encode_successful = False
+            try:
+                # Run the second ffmpeg process
+                process = subprocess.run(ffmpeg_cmd_2, check=True, capture_output=True, text=True, encoding='utf-8')
+                print("Re-encoding finished successfully.")
+                re_encode_successful = True
+                # Optionally print ffmpeg output if needed
+                # if show_ffmpeg_output:
+                #     print("FFmpeg Re-encoding Output:")
+                #     print(process.stderr)
+            except subprocess.CalledProcessError as e:
+                print(f"\n!!! Error during re-encoding (FFmpeg step 2) !!!")
+                print(f"Command: {' '.join(e.cmd)}")
+                print(f"Stderr: {e.stderr}")
+                should_transfer_audio = False # Don't attempt audio merge if re-encode failed
+            except Exception as e:
+                print(f"\n!!! Unexpected error during re-encoding: {e}")
+                traceback.print_exc()
+                should_transfer_audio = False # Don't attempt audio merge if re-encode failed
+
+            # <<< Clean up the temporary high-FPS file ONLY if re-encode was successful >>>
+            if re_encode_successful:
+                try:
+                    print(f"Removing temporary file: {vid_out_name_temp_highfps}")
+                    os.remove(vid_out_name_temp_highfps)
+                except OSError as e:
+                    print(f"Warning: Could not remove temp file {vid_out_name_temp_highfps}: {e}")
+            # If re-encode failed, the temp file is left for debugging
+
+        else:
+            # Target FPS is >= estimated high FPS, just rename the temp file
+            print(f"Target FPS ({target_fps}) is >= actual high FPS ({actual_high_fps:.2f}). Renaming temp file to -> {os.path.basename(vid_out_name)}, skipping re-encode.")
+            try:
+                os.rename(vid_out_name_temp_highfps, vid_out_name)
+                print(f"Renamed '{os.path.basename(vid_out_name_temp_highfps)}' to '{os.path.basename(vid_out_name)}'")
+            except OSError as e:
+                print(f"!!! Error renaming temporary file {vid_out_name_temp_highfps} to {vid_out_name}: {e}")
+                traceback.print_exc()
+                should_transfer_audio = False # Don't attempt audio merge if rename failed
+
+    else:
+        print(f"Warning: Temporary high-FPS file '{vid_out_name_temp_highfps}' not found or empty. Skipping re-encoding and audio merge.")
+        should_transfer_audio = False
+
+# --- Modified Audio Transfer Condition ---
+# Original condition: (not args.png) and fpsNotAssigned and (not args.no_audio) and (args.video is not None)
+# Problem: fpsNotAssigned is False when --fps is explicitly set.
+# New condition: Transfer audio if output is not PNG, source is video, and --no-audio is false.
+should_transfer_audio = (not args.png) and (args.video is not None) and (not args.no_audio)
+
+if should_transfer_audio:
+# --- End Modified Condition ---
     print("\nProcessing audio...")
     try:
         transferAudio(args.video, vid_out_name)
-    except Exception:
-        print("Audio transfer failed. Interpolated video will have no audio")
+    except Exception as audio_err: # Catch specific error
+        print(f"Audio transfer failed: {audio_err}. Interpolated video will have no audio")
+        # Check if the temp _noaudio file exists from transferAudio attempt
         targetNoAudio = os.path.splitext(vid_out_name)[0] + "_noaudio" + os.path.splitext(vid_out_name)[1]
-        os.rename(targetNoAudio, vid_out_name)
+        if os.path.exists(targetNoAudio):
+            try:
+                print(f"Renaming {targetNoAudio} back to {vid_out_name}")
+                os.rename(targetNoAudio, vid_out_name)
+            except OSError as rename_err:
+                print(f"Error renaming back after failed audio transfer: {rename_err}")
+        # else: # If transferAudio failed before renaming, vid_out_name should still be the correct one
+        #    pass
         
 print(f"\n[DONE] Completed video saved to: {vid_out_name}")
