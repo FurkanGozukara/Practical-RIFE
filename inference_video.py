@@ -88,7 +88,7 @@ parser.add_argument('--fp16', dest='fp16', action='store_true', help='fp16 mode 
 parser.add_argument('--UHD', dest='UHD', action='store_true', help='support 4k video')
 parser.add_argument('--scale', dest='scale', type=float, default=1.0, help='Try scale=0.5 for 4k video')
 parser.add_argument('--skip', dest='skip', action='store_true', help='whether to remove static frames before processing')
-parser.add_argument('--fps', dest='fps', type=int, default=None)
+parser.add_argument('--fps', dest='fps', type=float, default=None)
 parser.add_argument('--png', dest='png', action='store_true', help='whether to output png format frames')
 parser.add_argument('--ext', dest='ext', type=str, default='mp4', help='output video extension')
 parser.add_argument('--exp', dest='exp', type=int, default=1)
@@ -217,8 +217,13 @@ def clear_write_buffer(user_args, write_buffer, ffmpeg_proc=None):
         else:
             # Convert from RGB to BGR and write raw bytes to ffmpeg.
             frame_bgr = item[:, :, ::-1]
-            ffmpeg_proc.stdin.write(frame_bgr.tobytes())
-            ffmpeg_proc.stdin.flush()  # Ensure data is sent immediately
+            try:
+                ffmpeg_proc.stdin.write(frame_bgr.tobytes())
+                ffmpeg_proc.stdin.flush()  # Ensure data is sent immediately
+            except (OSError, BrokenPipeError) as e:
+                print(f"\nError writing frame to ffmpeg: {e}")
+                print("FFmpeg process may have terminated unexpectedly.")
+                break
 
 def build_read_buffer(user_args, read_buffer, videogen):
     try:
@@ -291,7 +296,7 @@ else:
     if args.output is not None:
         vid_out_name = args.output
     else:
-        vid_out_name = '{}_{}X_{}fps.{}'.format(video_path_wo_ext, args.multi, int(np.round(args.fps)), args.ext)
+        vid_out_name = '{}_{}X_{:.3f}fps.{}'.format(video_path_wo_ext, args.multi, args.fps, args.ext)
         
     # Define temporary high-FPS filename
     vid_out_name_temp_highfps = os.path.splitext(vid_out_name)[0] + "_temp_highfps" + os.path.splitext(vid_out_name)[1]
@@ -586,18 +591,18 @@ if not args.png:
     if os.path.exists(vid_out_name_temp_highfps) and os.path.getsize(vid_out_name_temp_highfps) > 0:
 
         # <<< Calculate target FPS >>>
-        target_fps = int(np.round(args.fps))
+        target_fps = args.fps  # Keep the exact FPS value, don't round to integer
         # We calculated actual_high_fps earlier: actual_high_fps = fps * args.multi
 
         # <<< Conditional Re-encoding >>>
         if target_fps < actual_high_fps:
             # Run re-encoding only if target FPS is lower
-            print(f"Target FPS ({target_fps}) is lower than actual high FPS ({actual_high_fps:.2f}). Re-encoding to -> {os.path.basename(vid_out_name)}...")
+            print(f"Target FPS ({target_fps:.3f}) is lower than actual high FPS ({actual_high_fps:.2f}). Re-encoding to -> {os.path.basename(vid_out_name)}...")
             sys.stdout.flush()
             ffmpeg_cmd_2 = [
                 'ffmpeg', '-y',
                 '-i', vid_out_name_temp_highfps, # Input is the high-FPS temp file
-                '-r', str(target_fps), # Apply the target frame rate
+                '-r', str(target_fps), # Apply the target frame rate (exact value)
                 '-c:v', 'libx264',
                 '-preset', 'slow', # Use original slower preset for final quality
                 '-crf', '10', # Use original CRF for final quality
@@ -636,7 +641,7 @@ if not args.png:
 
         else:
             # Target FPS is >= estimated high FPS, just rename the temp file
-            print(f"Target FPS ({target_fps}) is >= actual high FPS ({actual_high_fps:.2f}). Renaming temp file to -> {os.path.basename(vid_out_name)}, skipping re-encode.")
+            print(f"Target FPS ({target_fps:.3f}) is >= actual high FPS ({actual_high_fps:.2f}). Renaming temp file to -> {os.path.basename(vid_out_name)}, skipping re-encode.")
             try:
                 os.rename(vid_out_name_temp_highfps, vid_out_name)
                 print(f"Renamed '{os.path.basename(vid_out_name_temp_highfps)}' to '{os.path.basename(vid_out_name)}'")
